@@ -19,3 +19,9 @@ services:
         sync: false
       - key: UPSTASH_REDIS_REST_TOKEN
         sync: false
+      - key: BRAVE_SEARCH_API_KEY
+        sync: false
+      - key: NOTION_API_TOKEN
+        sync: false
+      - key: SLACK_BOT_TOKEN
+        sync: false

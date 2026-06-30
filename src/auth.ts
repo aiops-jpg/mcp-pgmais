@@ -5,7 +5,12 @@ import { Redis } from "@upstash/redis";
 type OAuth2Client = Auth.OAuth2Client;
 type Credentials = Auth.Credentials;
 
-const SCOPES = ["https://www.googleapis.com/auth/drive.readonly"];
+const SCOPES = [
+  "https://www.googleapis.com/auth/drive.readonly",
+  "https://www.googleapis.com/auth/gmail.readonly",
+  "https://www.googleapis.com/auth/calendar",
+  "https://www.googleapis.com/auth/spreadsheets",
+];
 const TOKEN_PREFIX = "mcp:session:";
 
 const redis =

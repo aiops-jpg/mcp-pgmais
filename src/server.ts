@@ -13,6 +13,13 @@ import {
   listRecent,
   getSharingInfo,
 } from "./drive.js";
+import { lookupCep, lookupCnpj, convertCurrency, webSearch } from "./external.js";
+import { formatDocument } from "./utils.js";
+import { searchEmails, readEmail } from "./gmail.js";
+import { listEvents, createEvent } from "./calendar.js";
+import { readSheet, writeSheet, appendSheet } from "./sheets.js";
+import { searchNotion } from "./notion.js";
+import { sendSlackMessage } from "./slack.js";
 
 const PORT = Number(process.env.PORT ?? 3000);
 const DRIVE_ROOT_FOLDER_ID = process.env.DRIVE_ROOT_FOLDER_ID || undefined;
@@ -240,6 +247,198 @@ function buildServer(sessionId: string): McpServer {
       };
     }
   );
+
+  // ── 8. CEP ───────────────────────────────────────────────────────────────
+  server.registerTool("cep_lookup", {
+    title: "Buscar endereço por CEP",
+    description: "Retorna endereço completo (logradouro, bairro, cidade, UF) a partir de um CEP brasileiro.",
+    inputSchema: { cep: z.string().describe("CEP com ou sem formatação (ex: 01310-100 ou 01310100)") },
+  }, async ({ cep }) => {
+    const result = await lookupCep(cep);
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], structuredContent: result as unknown as Record<string, unknown> };
+  });
+
+  // ── 9. CNPJ ──────────────────────────────────────────────────────────────
+  server.registerTool("cnpj_lookup", {
+    title: "Consultar dados de empresa por CNPJ",
+    description: "Retorna dados completos da empresa na Receita Federal: razão social, situação cadastral, endereço, sócios, atividade e mais.",
+    inputSchema: { cnpj: z.string().describe("CNPJ com ou sem formatação (ex: 11.222.333/0001-81 ou 11222333000181)") },
+  }, async ({ cnpj }) => {
+    const result = await lookupCnpj(cnpj);
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], structuredContent: result as Record<string, unknown> };
+  });
+
+  // ── 10. Conversão de moedas ───────────────────────────────────────────────
+  server.registerTool("currency_convert", {
+    title: "Converter moedas",
+    description: "Converte um valor entre duas moedas usando cotação em tempo real. Suporta BRL, USD, EUR, GBP, ARS, etc.",
+    inputSchema: {
+      from: z.string().describe("Código da moeda de origem (ex: USD, EUR, BRL)"),
+      to: z.string().describe("Código da moeda de destino (ex: BRL, USD)"),
+      amount: z.number().positive().describe("Valor a converter"),
+    },
+  }, async ({ from, to, amount }) => {
+    const result = await convertCurrency(from, to, amount);
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], structuredContent: result as unknown as Record<string, unknown> };
+  });
+
+  // ── 11. Busca na web ──────────────────────────────────────────────────────
+  server.registerTool("web_search", {
+    title: "Buscar na web",
+    description: "Realiza uma busca na web e retorna os resultados mais relevantes. Usa Brave Search (se BRAVE_SEARCH_API_KEY configurado) ou DuckDuckGo (grátis, sem configuração).",
+    inputSchema: {
+      query: z.string().describe("Termos de busca"),
+      count: z.number().int().min(1).max(10).default(5).describe("Número máximo de resultados"),
+    },
+  }, async ({ query, count }) => {
+    const result = await webSearch(query, count);
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], structuredContent: result as unknown as Record<string, unknown> };
+  });
+
+  // ── 12. Formatar documento ────────────────────────────────────────────────
+  server.registerTool("format_document", {
+    title: "Formatar e validar CNPJ ou CPF",
+    description: "Detecta automaticamente se é CNPJ (14 dígitos) ou CPF (11 dígitos), formata com máscara e valida os dígitos verificadores.",
+    inputSchema: { value: z.string().describe("Número do documento com ou sem formatação") },
+  }, async ({ value }) => {
+    const result = formatDocument(value);
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], structuredContent: result as unknown as Record<string, unknown> };
+  });
+
+  // ── 13. Gmail — busca ─────────────────────────────────────────────────────
+  server.registerTool("gmail_search", {
+    title: "Buscar e-mails no Gmail",
+    description: "Busca e-mails usando a sintaxe do Gmail (from:, to:, subject:, after:, before:, has:attachment, etc.). Retorna assunto, remetente, data e prévia.",
+    inputSchema: {
+      query: z.string().describe("Filtro de busca no formato Gmail (ex: 'from:cliente@empresa.com subject:proposta after:2024/01/01')"),
+      maxResults: z.number().int().min(1).max(50).default(10),
+    },
+  }, async ({ query, maxResults }) => {
+    const client = await auth.getClientForSession(sessionId);
+    const result = await searchEmails(client, query, maxResults);
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], structuredContent: result as unknown as Record<string, unknown> };
+  });
+
+  // ── 14. Gmail — leitura ───────────────────────────────────────────────────
+  server.registerTool("gmail_read", {
+    title: "Ler conteúdo de um e-mail",
+    description: "Lê o conteúdo completo de um e-mail pelo seu ID (obtido via gmail_search).",
+    inputSchema: { messageId: z.string().describe("ID do e-mail (obtido via gmail_search)") },
+  }, async ({ messageId }) => {
+    const client = await auth.getClientForSession(sessionId);
+    const result = await readEmail(client, messageId);
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], structuredContent: result as unknown as Record<string, unknown> };
+  });
+
+  // ── 15. Calendar — listar ─────────────────────────────────────────────────
+  server.registerTool("calendar_list_events", {
+    title: "Listar eventos do Google Calendar",
+    description: "Lista eventos da agenda em um intervalo de tempo. Use ISO 8601 para as datas (ex: 2024-06-30T00:00:00-03:00).",
+    inputSchema: {
+      timeMin: z.string().describe("Início do intervalo (ISO 8601, ex: 2024-06-30T00:00:00-03:00)"),
+      timeMax: z.string().describe("Fim do intervalo (ISO 8601)"),
+      maxResults: z.number().int().min(1).max(100).default(20),
+      calendarId: z.string().default("primary").describe("ID do calendário (padrão: 'primary')"),
+    },
+  }, async ({ timeMin, timeMax, maxResults, calendarId }) => {
+    const client = await auth.getClientForSession(sessionId);
+    const result = await listEvents(client, timeMin, timeMax, maxResults, calendarId);
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], structuredContent: result as unknown as Record<string, unknown> };
+  });
+
+  // ── 16. Calendar — criar ──────────────────────────────────────────────────
+  server.registerTool("calendar_create_event", {
+    title: "Criar evento no Google Calendar",
+    description: "Cria um novo evento na agenda. Pode incluir participantes (envia convites automaticamente) e localização.",
+    inputSchema: {
+      summary: z.string().describe("Título do evento"),
+      start: z.string().describe("Data/hora de início (ISO 8601, ex: 2024-07-01T14:00:00-03:00)"),
+      end: z.string().describe("Data/hora de fim (ISO 8601)"),
+      description: z.string().optional().describe("Descrição do evento"),
+      location: z.string().optional().describe("Local do evento"),
+      attendees: z.array(z.string().email()).optional().describe("Lista de e-mails dos participantes"),
+      calendarId: z.string().default("primary"),
+    },
+  }, async ({ summary, start, end, description, location, attendees, calendarId }) => {
+    const client = await auth.getClientForSession(sessionId);
+    const result = await createEvent(client, summary, start, end, { description, location, attendees, calendarId });
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], structuredContent: result as unknown as Record<string, unknown> };
+  });
+
+  // ── 17. Sheets — ler ──────────────────────────────────────────────────────
+  server.registerTool("sheets_read", {
+    title: "Ler dados de uma planilha Google Sheets",
+    description: "Lê os valores de um range de células em uma planilha. O range usa notação A1 (ex: 'Sheet1!A1:D10').",
+    inputSchema: {
+      spreadsheetId: z.string().describe("ID da planilha (da URL do Google Sheets)"),
+      range: z.string().describe("Range em notação A1 (ex: 'Sheet1!A1:D10' ou 'A1:Z100')"),
+    },
+  }, async ({ spreadsheetId, range }) => {
+    const client = await auth.getClientForSession(sessionId);
+    const result = await readSheet(client, spreadsheetId, range);
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], structuredContent: result as unknown as Record<string, unknown> };
+  });
+
+  // ── 18. Sheets — escrever ─────────────────────────────────────────────────
+  server.registerTool("sheets_write", {
+    title: "Escrever dados em uma planilha Google Sheets",
+    description: "Sobrescreve um range de células com os dados fornecidos. values é um array de arrays (linhas > colunas).",
+    inputSchema: {
+      spreadsheetId: z.string().describe("ID da planilha"),
+      range: z.string().describe("Range de destino em notação A1 (ex: 'Sheet1!A1')"),
+      values: z.array(z.array(z.unknown())).describe("Dados: array de linhas, cada linha é array de valores"),
+    },
+  }, async ({ spreadsheetId, range, values }) => {
+    const client = await auth.getClientForSession(sessionId);
+    const result = await writeSheet(client, spreadsheetId, range, values as unknown[][]);
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], structuredContent: result as unknown as Record<string, unknown> };
+  });
+
+  // ── 19. Sheets — append ───────────────────────────────────────────────────
+  server.registerTool("sheets_append", {
+    title: "Adicionar linhas em uma planilha Google Sheets",
+    description: "Adiciona novas linhas ao final de um range em uma planilha, sem sobrescrever dados existentes.",
+    inputSchema: {
+      spreadsheetId: z.string().describe("ID da planilha"),
+      range: z.string().describe("Range de referência (ex: 'Sheet1!A:Z') — os dados são inseridos após a última linha preenchida"),
+      values: z.array(z.array(z.unknown())).describe("Linhas a adicionar"),
+    },
+  }, async ({ spreadsheetId, range, values }) => {
+    const client = await auth.getClientForSession(sessionId);
+    const result = await appendSheet(client, spreadsheetId, range, values as unknown[][]);
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], structuredContent: result as unknown as Record<string, unknown> };
+  });
+
+  // ── 20. Notion — busca ───────────────────────────────────────────────────
+  server.registerTool("notion_search", {
+    title: "Buscar no Notion",
+    description: "Busca páginas e databases no Notion. Requer NOTION_API_TOKEN configurado nas variáveis de ambiente.",
+    inputSchema: {
+      query: z.string().describe("Termo de busca"),
+      pageSize: z.number().int().min(1).max(20).default(10),
+    },
+  }, async ({ query, pageSize }) => {
+    const token = process.env.NOTION_API_TOKEN;
+    if (!token) throw new Error("NOTION_API_TOKEN não configurado. Adicione nas variáveis de ambiente do servidor.");
+    const result = await searchNotion(token, query, pageSize);
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], structuredContent: result as unknown as Record<string, unknown> };
+  });
+
+  // ── 21. Slack — enviar mensagem ───────────────────────────────────────────
+  server.registerTool("slack_send", {
+    title: "Enviar mensagem no Slack",
+    description: "Envia uma mensagem para um canal ou usuário do Slack. Requer SLACK_BOT_TOKEN configurado.",
+    inputSchema: {
+      channel: z.string().describe("Canal (ex: #geral) ou ID do usuário (ex: U01234)"),
+      text: z.string().describe("Texto da mensagem (suporta Slack markdown)"),
+      username: z.string().optional().default("MCP Assistant").describe("Nome exibido como remetente"),
+    },
+  }, async ({ channel, text, username }) => {
+    const token = process.env.SLACK_BOT_TOKEN;
+    if (!token) throw new Error("SLACK_BOT_TOKEN não configurado. Adicione nas variáveis de ambiente do servidor.");
+    const result = await sendSlackMessage(token, channel, text, username);
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], structuredContent: result as unknown as Record<string, unknown> };
+  });
 
   return server;
 }
