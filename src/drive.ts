@@ -1,12 +1,5 @@
-import { createRequire } from "node:module";
+import { extractText, getDocumentProxy } from "unpdf";
 import { Auth, drive_v3, google } from "googleapis";
-
-// Workaround ESM: importa o core do pdf-parse sem acionar o carregamento do PDF de teste
-const _require = createRequire(import.meta.url);
-const pdfParse = _require("pdf-parse/lib/pdf-parse.js") as (
-  buffer: Buffer,
-  options?: { max?: number }
-) => Promise<{ text: string; numpages: number }>;
 
 type OAuth2Client = Auth.OAuth2Client;
 
@@ -293,9 +286,10 @@ export async function readFile(
       { fileId, alt: "media", supportsAllDrives: true },
       { responseType: "arraybuffer" }
     );
-    const buffer = Buffer.from(res.data as ArrayBuffer);
-    const parsed = await pdfParse(buffer);
-    return chunk(name, mimeType, parsed.text, offset, chunkSize, parsed.numpages);
+    const uint8 = new Uint8Array(res.data as ArrayBuffer);
+    const pdf = await getDocumentProxy(uint8);
+    const { totalPages, text } = await extractText(pdf, { mergePages: true });
+    return chunk(name, mimeType, text, offset, chunkSize, totalPages);
   }
 
   // Google Workspace exportável
