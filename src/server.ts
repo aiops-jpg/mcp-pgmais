@@ -482,7 +482,10 @@ app.get("/oauth/callback", async (req, res) => {
   }
 });
 
-app.get("/healthz", (_req, res) => res.json({ status: "ok" }));
+app.get("/healthz", (_req, res) => {
+  console.log(`[healthz] ping ${new Date().toISOString()}`);
+  res.json({ status: "ok" });
+});
 
 app.listen(PORT, () => {
   console.log(`MCP Drive server rodando em http://localhost:${PORT}/mcp`);
